@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import yfinance as yf
 from google import genai
 from google.genai import types
@@ -14,11 +15,6 @@ if not API_KEY:
 
 client = genai.Client(api_key=API_KEY)
 
-# ─── Static Industry Benchmark Data ──────────────────────────
-# Approximate, commonly-cited PE ranges for major Indian sectors.
-# NOT live data — a static reference table. Real live industry-average PE
-# needs a paid provider (Screener.in, Trendlyne). Good enough to compare
-# against instead of the model guessing blind.
 INDUSTRY_PE_BENCHMARKS = {
     "Technology": {"typical_pe_range": "22-30", "note": "IT services sector, India (approximate reference, not live-calculated)"},
     "Financial Services": {"typical_pe_range": "15-22", "note": "Banking/NBFC sector, India (approximate reference)"},
@@ -31,7 +27,18 @@ INDUSTRY_PE_BENCHMARKS = {
     "Communication Services": {"typical_pe_range": "18-28", "note": "Telecom, media, India (approximate reference)"},
 }
 
-# ─── Tools ────────────────────────────────────────────────────
+def sanitize(data: dict) -> dict:
+    """Replaces NaN/None/infinite values with 'N/A' so the data is always valid JSON before it's sent to the API."""
+    clean = {}
+    for key, value in data.items():
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            clean[key] = "N/A"
+        elif value is None:
+            clean[key] = "N/A"
+        else:
+            clean[key] = value
+    return clean
+
 def get_fundamental_data(ticker: str) -> dict:
     """Fetches fundamental financial data for an Indian stock (PE ratio, ROE, profit margins, debt, revenue growth, sector). Use when the user asks about valuation, profitability, or long-term investment quality. Ticker must use .NS suffix, e.g. INFY.NS."""
     stock = yf.Ticker(ticker)
@@ -40,7 +47,7 @@ def get_fundamental_data(ticker: str) -> dict:
     except Exception as exc:
         raise RuntimeError(f"yfinance could not fetch fundamental data for {ticker}.") from exc
 
-    return {
+    return sanitize({
         "Company": info.get("longName", "N/A"),
         "Sector": info.get("sector", "N/A"),
         "Industry": info.get("industry", "N/A"),
@@ -49,7 +56,7 @@ def get_fundamental_data(ticker: str) -> dict:
         "Profit Margins": info.get("profitMargins", "N/A"),
         "Revenue Growth": info.get("revenueGrowth", "N/A"),
         "Debt to Equity": info.get("debtToEquity", "N/A"),
-    }
+    })
 
 def get_technical_data(ticker: str) -> dict:
     """Fetches technical price data for an Indian stock (current price, moving averages, 52-week range). Use when the user asks about price trends, momentum, or short-term outlook. Ticker must use .NS suffix, e.g. INFY.NS."""
@@ -63,13 +70,19 @@ def get_technical_data(ticker: str) -> dict:
     if history.empty:
         raise RuntimeError(f"No price history for {ticker}. Check the ticker symbol.")
 
-    return {
-        "Current Price": round(history["Close"].iloc[-1], 2),
+    valid_closes = history["Close"].dropna()
+    if not valid_closes.empty:
+        current_price = round(valid_closes.iloc[-1], 2)
+    else:
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice") or "N/A"
+
+    return sanitize({
+        "Current Price": current_price,
         "50 Day MA": info.get("fiftyDayAverage", "N/A"),
         "200 Day MA": info.get("twoHundredDayAverage", "N/A"),
         "52W High": info.get("fiftyTwoWeekHigh", "N/A"),
         "52W Low": info.get("fiftyTwoWeekLow", "N/A"),
-    }
+    })
 
 def get_industry_benchmark(sector: str) -> dict:
     """Returns a typical PE ratio range for a given market sector in the Indian stock market, used to judge whether a stock's PE is high or low relative to peers. Call this AFTER get_fundamental_data, passing the exact 'Sector' value it returned. This is a static approximate reference table, not live-calculated data — state that clearly when using it. Available sectors: Technology, Financial Services, Consumer Cyclical, Healthcare, Consumer Defensive, Energy, Basic Materials, Industrials, Communication Services."""
@@ -78,7 +91,6 @@ def get_industry_benchmark(sector: str) -> dict:
         return {"error": f"No benchmark available for sector '{sector}'. Say comparison isn't possible instead of guessing a number."}
     return data
 
-# ─── Agent With Retry-On-Rate-Limit ──────────────────────────
 def ask_agent_with_tools(user_message, max_retries=2):
     system_instruction = (
         "You are a stock research assistant for Indian markets (tickers use .NS suffix). "
@@ -103,19 +115,20 @@ def ask_agent_with_tools(user_message, max_retries=2):
             return response.text
         except Exception as e:
             err_text = str(e).lower()
-            if "429" in err_text or "resource_exhausted" in err_text or "quota" in err_text:
+            transient = ("429" in err_text or "resource_exhausted" in err_text or "quota" in err_text
+                         or "503" in err_text or "unavailable" in err_text)
+            if transient:
                 if attempt < max_retries:
                     wait_time = 15 * (attempt + 1)
-                    print(f"Rate limit hit. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...")
+                    print(f"Server busy/rate limited. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    return "Rate limit exceeded and retries exhausted. Check your quota at ai.google.dev — free tier has per-minute and per-day limits. Wait a bit before trying again."
+                    return "Server still unavailable after retries. This is usually temporary — try again in a minute."
             else:
                 return f"Unexpected error: {e}"
 
-# ─── Main Loop ────────────────────────────────────────────────
-print("=== Agent With Tools + Industry Benchmarking ===\n")
+print("=== Agent With Tools + Industry Benchmarking (Sanitized + Robust Price Fetch) ===\n")
 print("Note: Use NSE format — INFY.NS / TCS.NS / RELIANCE.NS\n")
 
 while True:
