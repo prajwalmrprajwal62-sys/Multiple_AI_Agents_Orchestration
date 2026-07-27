@@ -92,6 +92,7 @@ def get_industry_benchmark(sector: str) -> dict:
 # ─── Error Diagnosis ────────────────────────────────────────
 def diagnose_error(e):
     err_str = str(e)
+    print(f"[RAW ERROR — for debugging]: {err_str[:400]}\n")
     code = getattr(e, "code", None)
     status = getattr(e, "status", None)
 
