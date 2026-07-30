@@ -5,6 +5,28 @@ import yfinance as yf
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+import asyncio
+from datetime import datetime, timedelta
+
+cache = {}
+
+def get_cached_or_run(ticker):
+    now = datetime.now()
+    if ticker in cache and now - cache[ticker]["time"] < timedelta(minutes=15):
+        return cache[ticker]["data"]
+    result = run_full_pipeline(ticker)  # or the async version
+    cache[ticker] = {"data": result, "time": now}
+    return result
+
+async def run_full_pipeline_async(ticker):
+    fund_task = asyncio.to_thread(run_fundamental_agent, ticker)
+    tech_task = asyncio.to_thread(run_technical_agent, ticker)
+    news_task = asyncio.to_thread(run_news_agent, ticker)
+
+    fund_result, tech_result, news_result = await asyncio.gather(fund_task, tech_task, news_task)
+
+    final = run_chief_agent(ticker, fund_result, tech_result, news_result)
+    return {"fundamental": fund_result, "technical": tech_result, "news": news_result, "verdict": final}
 
 load_dotenv()
 
